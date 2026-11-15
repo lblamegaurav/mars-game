@@ -892,6 +892,21 @@ h1.game-title {
   letter-spacing: 0.1em;
   box-shadow: 0 0 12px rgba(120, 184, 96, 0.25);
   white-space: nowrap;
+  transition: color 0.25s, border-color 0.25s, background-color 0.25s;
+}
+
+#top-fps-badge.fps-moderate {
+  color: #e8b058;
+  border-color: #d4953c;
+  background: rgba(232, 176, 88, 0.15);
+  box-shadow: 0 0 12px rgba(232, 176, 88, 0.25);
+}
+
+#top-fps-badge.fps-low {
+  color: #e06858;
+  border-color: #c4483c;
+  background: rgba(224, 104, 88, 0.15);
+  box-shadow: 0 0 12px rgba(224, 104, 88, 0.25);
 }
 
 #top-ping-badge {
@@ -1075,7 +1090,7 @@ h1.game-title {
   height: 155px;
   border-radius: 6px;
   overflow: hidden;
-  background: #000000;
+  background: #0c0805;
   border: 1px solid rgba(224, 155, 76, 0.35);
   box-shadow: inset 0 0 12px rgba(0, 0, 0, 0.9);
 }

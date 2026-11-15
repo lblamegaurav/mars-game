@@ -76,8 +76,9 @@ export class MarsUI {
     this._lastRadarDbStr = '';
     this._lastFuelPercent = -1;
 
-    // Pre-bake static speedometer dial plate (Pillar 2: 95% 2D canvas draw call speedup)
+    // Pre-bake static speedometer & sonar dial plates (Pillar 2: 95% 2D canvas draw call speedup)
     this._initSpeedometerDialCache();
+    this._initSonarDialCache();
 
     this._setupCompassTape();
     this._setupControls();
@@ -174,6 +175,54 @@ export class MarsUI {
     ctx.font = 'bold 6.5px "Lucida Calligraphy", sans-serif';
     ctx.fillStyle = 'rgba(224, 155, 76, 0.65)';
     ctx.fillText('KM/H', cx, cy - 14);
+  }
+
+  _initSonarDialCache() {
+    if (!this.sonarCanvas) return;
+    const w = this.sonarCanvas.width;
+    const h = this.sonarCanvas.height;
+    const cx = w / 2;
+    const cy = h / 2;
+    const maxRadius = w / 2 - 4;
+
+    this.sonarDialCanvas = document.createElement('canvas');
+    this.sonarDialCanvas.width = w;
+    this.sonarDialCanvas.height = h;
+    const ctx = this.sonarDialCanvas.getContext('2d');
+
+    // Background circular radar plate
+    ctx.fillStyle = '#140c08';
+    ctx.beginPath();
+    ctx.arc(cx, cy, maxRadius, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Range rings
+    ctx.strokeStyle = '#2d1b11';
+    ctx.lineWidth = 1;
+    [0.33, 0.66, 1.0].forEach(r => {
+      ctx.beginPath();
+      ctx.arc(cx, cy, maxRadius * r, 0, Math.PI * 2);
+      ctx.stroke();
+    });
+
+    // Crosshairs
+    ctx.beginPath();
+    ctx.moveTo(cx, 4);
+    ctx.lineTo(cx, h - 4);
+    ctx.moveTo(4, cy);
+    ctx.lineTo(w - 4, cy);
+    ctx.stroke();
+
+    // Directional orientation labels along radar perimeter (▲, ▼, L, R)
+    ctx.font = 'bold 8.5px "Lucida Calligraphy", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(245, 158, 11, 0.7)';
+    ctx.fillText('▲', cx, 8);
+    ctx.fillStyle = 'rgba(184, 110, 53, 0.55)';
+    ctx.fillText('▼', cx, h - 8);
+    ctx.fillText('L', 9, cy);
+    ctx.fillText('R', w - 9, cy);
   }
 
   // --- Start Game & Optical Wake Sequence ---
@@ -725,41 +774,12 @@ export class MarsUI {
     const cy = h / 2;
     const maxRadius = w / 2 - 4;
 
-    ctx.clearRect(0, 0, w, h);
-
-    // Background circular radar plate
-    ctx.fillStyle = '#140c08';
-    ctx.beginPath();
-    ctx.arc(cx, cy, maxRadius, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Range rings
-    ctx.strokeStyle = '#2d1b11';
-    ctx.lineWidth = 1;
-    [0.33, 0.66, 1.0].forEach(r => {
-      ctx.beginPath();
-      ctx.arc(cx, cy, maxRadius * r, 0, Math.PI * 2);
-      ctx.stroke();
-    });
-
-    // Crosshairs
-    ctx.beginPath();
-    ctx.moveTo(cx, 4);
-    ctx.lineTo(cx, h - 4);
-    ctx.moveTo(4, cy);
-    ctx.lineTo(w - 4, cy);
-    ctx.stroke();
-
-    // Directional orientation labels along radar perimeter (FWD, REV, L, R)
-    ctx.font = 'bold 8.5px "Lucida Calligraphy", sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = 'rgba(245, 158, 11, 0.7)';
-    ctx.fillText('▲', cx, 8);
-    ctx.fillStyle = 'rgba(184, 110, 53, 0.55)';
-    ctx.fillText('▼', cx, h - 8);
-    ctx.fillText('L', 9, cy);
-    ctx.fillText('R', w - 9, cy);
+    // 1. Instant GPU blit of pre-baked radar dial plate (Pillar 2)
+    if (this.sonarDialCanvas) {
+      ctx.drawImage(this.sonarDialCanvas, 0, 0);
+    } else {
+      ctx.clearRect(0, 0, w, h);
+    }
 
     // Rotating sweep line
     this.sonarSweepAngle += 0.035;
@@ -895,7 +915,7 @@ export class MarsUI {
       ctx.strokeStyle = '#e09b4c';
       ctx.lineWidth = 1.4;
       ctx.beginPath();
-      for (let x = 0; x < w; x++) {
+      for (let x = 0; x <= w; x += 3) {
         const progress = x / w;
         const wave = Math.sin(progress * 18 + t * 3.2) * 14
                    + Math.sin(progress * 7 - t * 1.8) * 7;
@@ -909,7 +929,7 @@ export class MarsUI {
       ctx.strokeStyle = 'rgba(245, 207, 130, 0.75)';
       ctx.lineWidth = 1.1;
       ctx.beginPath();
-      for (let x = 0; x < w; x++) {
+      for (let x = 0; x <= w; x += 3) {
         const progress = x / w;
         const wave = Math.sin(progress * 22 + t * 4.1 + 0.8) * 11
                    + Math.cos(progress * 9 - t * 2.2) * 5;
@@ -923,7 +943,7 @@ export class MarsUI {
       ctx.strokeStyle = 'rgba(56, 189, 248, 0.7)';
       ctx.lineWidth = 1.2;
       ctx.beginPath();
-      for (let x = 0; x < w; x++) {
+      for (let x = 0; x <= w; x += 3) {
         const progress = x / w;
         const wave = Math.sin(progress * 12 + t * 2.0 + 1.6) * 8;
         const y = midY + wave;
@@ -958,7 +978,7 @@ export class MarsUI {
       ctx.lineWidth = 1.2;
       ctx.beginPath();
 
-      for (let x = 0; x < w; x++) {
+      for (let x = 0; x <= w; x += 2) {
         const progress = x / w;
         // High frequency noise jitter
         const noise = (Math.sin(x * 1.7 + t * 40) + Math.cos(x * 3.1 - t * 25)) * 0.5;

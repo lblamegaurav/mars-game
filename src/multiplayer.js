@@ -85,9 +85,10 @@ export class MarsMultiplayer {
     this.broadcastInterval = 50;
 
     // Zero-Allocation Network Buffers & Real-Time Ping Monitoring
-    this.ping = 14;
+    this.ping = 22;
     this.lastPingSentTime = 0;
-    this.pingInterval = 1000;
+    this.pingInterval = 800; // Responsive real-time network measurement frequency
+    this._isPinging = false;
 
     this._telemetryPacket = {
       type: 'state',
@@ -102,6 +103,43 @@ export class MarsMultiplayer {
     };
     this._pingPacket = { type: '_ping', t: 0 };
     this._pongPacket = { type: '_pong', t: 0 };
+  }
+
+  // Real-time network probe measuring exact physical HTTP RTT to Vercel/host
+  async _measureRealNetworkPing() {
+    if (this._isPinging) return;
+    this._isPinging = true;
+    const t0 = performance.now();
+    try {
+      const isLocal = typeof window !== 'undefined' && 
+        (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+      
+      // On localhost, probe Cloudflare edge for true external internet latency; on deployed Vercel, probe origin ping.txt
+      const targetUrl = isLocal 
+        ? `https://1.1.1.1/cdn-cgi/trace?_t=${Date.now()}`
+        : `${window.location.origin}/ping.txt?_t=${Date.now()}`;
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 1800);
+      await fetch(targetUrl, { 
+        method: isLocal ? 'GET' : 'HEAD', 
+        mode: isLocal ? 'no-cors' : 'cors', 
+        cache: 'no-store', 
+        signal: controller.signal 
+      });
+      clearTimeout(timer);
+      const rtt = Math.max(1, Math.round(performance.now() - t0));
+      this.ping = rtt;
+    } catch (e) {
+      // Fallback fast edge probe
+      try {
+        const t1 = performance.now();
+        await fetch(`https://1.1.1.1/cdn-cgi/trace?_t=${Date.now()}`, { mode: 'no-cors', cache: 'no-store' });
+        this.ping = Math.max(1, Math.round(performance.now() - t1));
+      } catch (err) {}
+    } finally {
+      this._isPinging = false;
+    }
   }
 
   // Build a distinct visual 3D rover mesh for a remote peer
@@ -609,19 +647,21 @@ export class MarsMultiplayer {
   update(dt) {
     const now = performance.now();
 
-    // 1. Periodic Ping Heartbeat (Every 1000ms)
+    // 1. Periodic Real Ping Heartbeat (Every 1200ms)
     if (now - this.lastPingSentTime >= this.pingInterval) {
       this.lastPingSentTime = now;
       this._pingPacket.t = now;
       if (!this.isHost && this.conn && this.conn.open) {
+        // Real WebRTC P2P Data Channel RTT
         this.conn.send(this._pingPacket);
       } else if (this.isHost && this.connections.size > 0) {
+        // Host pings clients
         this.connections.forEach(entry => {
           if (entry.conn && entry.conn.open) entry.conn.send(this._pingPacket);
         });
-      } else if (!this.isConnected) {
-        // Pure single-player loopback network ping simulation (~12-16ms authentic local signal)
-        this.ping = Math.round(14 + Math.sin(now * 0.002) * 3);
+      } else {
+        // Real HTTP Network RTT to active server / Vercel edge
+        this._measureRealNetworkPing();
       }
     }
 
@@ -658,5 +698,10 @@ export class MarsMultiplayer {
         );
       }
     });
+  }
+
+  // Real-time network roundtrip ping in milliseconds
+  getPing() {
+    return Math.max(1, Math.round(this.ping || 1));
   }
 }

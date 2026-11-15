@@ -181,12 +181,7 @@ export class MarsRover {
       spotLight.penumbra = 0.85; // Soft feathered falloff (no harsh circle)
       spotLight.decay = 1.5;
       spotLight.distance = 80;
-      spotLight.castShadow = idx === 0;
-      if (spotLight.castShadow) {
-        spotLight.shadow.mapSize.width = 512;
-        spotLight.shadow.mapSize.height = 512;
-        spotLight.shadow.bias = -0.0008;
-      }
+      spotLight.castShadow = false; // Disabled spotlight shadow map to eliminate redundant GPU shadow pass on laptops
 
       // Aimed downwards at the ground in front of rover (pools light directly onto sand dunes)
       const targetObj = new THREE.Object3D();
