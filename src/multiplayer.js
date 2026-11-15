@@ -1,4 +1,22 @@
 import * as THREE from 'three';
+import { Peer } from 'peerjs';
+
+// Multi-Region Public STUN Servers with ICE candidate pooling for NAT traversal
+const PEER_STUN_CONFIG = {
+  debug: 1,
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' },
+      { urls: 'stun:stun4.l.google.com:19302' },
+      { urls: 'stun:global.stun.twilio.com:3478' }
+    ],
+    iceCandidatePoolSize: 10,
+    sdpSemantics: 'unified-plan'
+  }
+};
 
 // 6 Distinct Thematic Rover Explorer Profiles for Acidalia Expedition
 const EXPLORER_PROFILES = [
@@ -55,13 +73,14 @@ export class MarsMultiplayer {
     this.onStatus = onStatusMessage || console.log;
 
     this.peer = null;
-    this.conn = null; // Client's connection to host
+    this.conn = null; // Client's active connection to host
     this.connections = new Map(); // Host: peerId -> { conn, name, slotIndex }
     this.isHost = false;
     this.isConnected = false;
     this.inGame = false;
 
     this.myPeerId = 'local';
+    this.mySlotIndex = 0;
     this.roomCode = '';
     this.roomPassword = '';
     this.localPlayerName = 'Commander Unit-01';
@@ -71,29 +90,35 @@ export class MarsMultiplayer {
     this.onRosterUpdated = null;
     this.onGameStart = null;
     this.onRoomClosed = null;
+    this.onRoomCodeChanged = null;
 
     // Up to 6 simultaneous players: Map of peerId -> remotePlayerRecord
     this.remotePlayers = new Map();
 
-    // Wheel geometry shared across all remote rovers for memory efficiency
+    // Authentic NASA Curiosity Rover GLB Template (loaded from glbManager)
+    this.roverModelTemplate = null;
+
+    // Fallback Wheel geometry shared across remote rovers
     this.wheelGeom = new THREE.CylinderGeometry(0.48, 0.48, 0.35, 12);
     this.wheelGeom.rotateZ(Math.PI / 2);
     this.wheelMat = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 0.95 });
 
-    // Throttle outbound telemetry (~20 updates/sec = 50ms, optimized for mobile/low network load)
+    // Outbound telemetry throttling (~20 updates/sec = 50ms)
     this.lastBroadcastTime = 0;
     this.broadcastInterval = 50;
 
-    // Zero-Allocation Network Buffers & Real-Time Ping Monitoring
-    this.ping = 22;
+    // Real-Time Ping Monitoring
+    this.ping = 20;
     this.lastPingSentTime = 0;
-    this.pingInterval = 800; // Responsive real-time network measurement frequency
+    this.pingInterval = 800; // 800ms heartbeat
     this._isPinging = false;
 
+    // Pre-allocated Zero-Allocation Network Buffers
     this._telemetryPacket = {
       type: 'state',
       id: '',
       name: '',
+      slot: 0,
       x: 0,
       y: 0,
       z: 0,
@@ -103,6 +128,54 @@ export class MarsMultiplayer {
     };
     this._pingPacket = { type: '_ping', t: 0 };
     this._pongPacket = { type: '_pong', t: 0 };
+
+    this.joinRetryCount = 0;
+    this.maxJoinRetries = 2;
+  }
+
+  // Set the authentic Curiosity GLB model template once loaded
+  setRoverModelTemplate(template) {
+    if (!template) return;
+    this.roverModelTemplate = template;
+    // Upgrade any already connected remote players to the authentic GLB model
+    this.remotePlayers.forEach((player) => {
+      this._applyGLBModelToRemotePlayer(player, template);
+    });
+  }
+
+  _applyGLBModelToRemotePlayer(player, template) {
+    if (!template || !player || !player.group) return;
+
+    // Remove procedural fallback meshes if any
+    const toRemove = player.group.children.filter(child => child !== player.labelSprite);
+    toRemove.forEach(child => player.group.remove(child));
+
+    const clone = template.clone(true);
+    const profile = player.profile || EXPLORER_PROFILES[0];
+
+    clone.traverse(child => {
+      if (child.isMesh) {
+        child.castShadow = true;
+        child.receiveShadow = true;
+        if (child.material) {
+          child.material = child.material.clone();
+          child.material.roughness = 0.78;
+          child.material.metalness = 0.22;
+          if (child.material.emissive) {
+            child.material.emissive.setHex(profile.glowHex);
+            child.material.emissiveIntensity = 0.25;
+          }
+        }
+      }
+    });
+
+    // Add holographic team colored beacon light on sensor mast
+    const beaconLight = new THREE.PointLight(profile.glowHex, 2.5, 20, 1.8);
+    beaconLight.position.set(0.4, 2.35, -1.0);
+    player.group.add(beaconLight);
+
+    player.group.add(clone);
+    player.hasGLB = true;
   }
 
   // Real-time network probe measuring exact physical HTTP RTT to Vercel/host
@@ -113,8 +186,8 @@ export class MarsMultiplayer {
     try {
       const isLocal = typeof window !== 'undefined' && 
         (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
-      
-      // On localhost, probe Cloudflare edge for true external internet latency; on deployed Vercel, probe origin ping.txt
+
+      // On localhost, probe Cloudflare edge for true internet latency; on deployed Vercel, probe origin ping.txt
       const targetUrl = isLocal 
         ? `https://1.1.1.1/cdn-cgi/trace?_t=${Date.now()}`
         : `${window.location.origin}/ping.txt?_t=${Date.now()}`;
@@ -131,7 +204,6 @@ export class MarsMultiplayer {
       const rtt = Math.max(1, Math.round(performance.now() - t0));
       this.ping = rtt;
     } catch (e) {
-      // Fallback fast edge probe
       try {
         const t1 = performance.now();
         await fetch(`https://1.1.1.1/cdn-cgi/trace?_t=${Date.now()}`, { mode: 'no-cors', cache: 'no-store' });
@@ -148,65 +220,12 @@ export class MarsMultiplayer {
     const group = new THREE.Group();
     group.name = `remote-rover-${peerId}`;
 
-    // Chassis body
-    const chassisMat = new THREE.MeshStandardMaterial({
-      color: profile.chassisHex,
-      roughness: 0.8,
-      metalness: 0.35
-    });
-    const bodyGeom = new THREE.BoxGeometry(2.4, 0.7, 3.2);
-    const body = new THREE.Mesh(bodyGeom, chassisMat);
-    body.position.y = 0.74;
-    body.castShadow = true;
-    body.receiveShadow = true;
-    group.add(body);
-
-    // Accent Stripe
-    const stripeMat = new THREE.MeshBasicMaterial({ color: profile.glowHex });
-    const stripeGeom = new THREE.BoxGeometry(2.44, 0.08, 0.6);
-    const stripe = new THREE.Mesh(stripeGeom, stripeMat);
-    stripe.position.set(0, 0.79, 0.4);
-    group.add(stripe);
-
-    // Sensor mast
-    const mastGeom = new THREE.CylinderGeometry(0.07, 0.07, 1.4, 8);
-    const mast = new THREE.Mesh(mastGeom, chassisMat);
-    mast.position.set(0.4, 1.64, -1.0);
-    group.add(mast);
-
-    // Luminous Beacon Light & Orb
-    const beaconLight = new THREE.PointLight(profile.glowHex, 4.5, 30, 1.5);
-    beaconLight.position.set(0.4, 2.34, -1.0);
-    group.add(beaconLight);
-
-    const beaconGeom = new THREE.SphereGeometry(0.18, 10, 10);
-    const beaconMat = new THREE.MeshBasicMaterial({ color: profile.glowHex });
-    const beaconMesh = new THREE.Mesh(beaconGeom, beaconMat);
-    beaconMesh.position.set(0.4, 2.34, -1.0);
-    group.add(beaconMesh);
-
-    // 6 Wheels (Tires firmly touching sand surface, no hovering gap)
-    const wheelOffsets = [
-      [-1.4, 0.44, -1.2], [1.4, 0.44, -1.2],
-      [-1.5, 0.42, 0.0],  [1.5, 0.42, 0.0],
-      [-1.4, 0.44, 1.2],  [1.4, 0.44, 1.2]
-    ];
-    wheelOffsets.forEach(pos => {
-      const w = new THREE.Mesh(this.wheelGeom, this.wheelMat);
-      w.position.set(pos[0], pos[1], pos[2]);
-      w.castShadow = true;
-      group.add(w);
-    });
-
     // Holographic Nameplate Sprite
     const labelSprite = this._createBillboardSprite(playerName, profile);
     labelSprite.position.set(0, 3.4, 0);
     group.add(labelSprite);
 
-    group.visible = false;
-    this.scene.add(group);
-
-    return {
+    const playerRecord = {
       group,
       labelSprite,
       profile,
@@ -214,8 +233,58 @@ export class MarsMultiplayer {
       targetHeading: 0,
       targetPitch: 0,
       speed: 0,
-      name: playerName
+      name: playerName,
+      hasGLB: false
     };
+
+    if (this.roverModelTemplate) {
+      this._applyGLBModelToRemotePlayer(playerRecord, this.roverModelTemplate);
+    } else {
+      // Sleek procedural fallback
+      const chassisMat = new THREE.MeshStandardMaterial({
+        color: profile.chassisHex,
+        roughness: 0.8,
+        metalness: 0.35
+      });
+      const bodyGeom = new THREE.BoxGeometry(2.4, 0.7, 3.2);
+      const body = new THREE.Mesh(bodyGeom, chassisMat);
+      body.position.y = 0.74;
+      body.castShadow = true;
+      body.receiveShadow = true;
+      group.add(body);
+
+      const stripeMat = new THREE.MeshBasicMaterial({ color: profile.glowHex });
+      const stripeGeom = new THREE.BoxGeometry(2.44, 0.08, 0.6);
+      const stripe = new THREE.Mesh(stripeGeom, stripeMat);
+      stripe.position.set(0, 0.79, 0.4);
+      group.add(stripe);
+
+      const mastGeom = new THREE.CylinderGeometry(0.07, 0.07, 1.4, 8);
+      const mast = new THREE.Mesh(mastGeom, chassisMat);
+      mast.position.set(0.4, 1.64, -1.0);
+      group.add(mast);
+
+      const beaconLight = new THREE.PointLight(profile.glowHex, 3.5, 25, 1.5);
+      beaconLight.position.set(0.4, 2.34, -1.0);
+      group.add(beaconLight);
+
+      const wheelOffsets = [
+        [-1.4, 0.44, -1.2], [1.4, 0.44, -1.2],
+        [-1.5, 0.42, 0.0],  [1.5, 0.42, 0.0],
+        [-1.4, 0.44, 1.2],  [1.4, 0.44, 1.2]
+      ];
+      wheelOffsets.forEach(pos => {
+        const w = new THREE.Mesh(this.wheelGeom, this.wheelMat);
+        w.position.set(pos[0], pos[1], pos[2]);
+        w.receiveShadow = true;
+        group.add(w);
+      });
+    }
+
+    group.visible = false;
+    this.scene.add(group);
+
+    return playerRecord;
   }
 
   // Create lightweight canvas texture for overhead nameplate
@@ -251,7 +320,7 @@ export class MarsMultiplayer {
   _getOrCreateRemotePlayer(peerId, name, slotIndex) {
     let player = this.remotePlayers.get(peerId);
     if (!player) {
-      player = this._buildRemoteRover(peerId, name, slotIndex || (this.remotePlayers.size + 1));
+      player = this._buildRemoteRover(peerId, name, slotIndex !== undefined ? slotIndex : (this.remotePlayers.size + 1));
       this.remotePlayers.set(peerId, player);
     }
     return player;
@@ -268,21 +337,31 @@ export class MarsMultiplayer {
   }
 
   _getPeerConstructor() {
-    return window.Peer || null;
+    return Peer || window.Peer || null;
+  }
+
+  _normalizeRoomCode(code) {
+    if (!code) return '';
+    let str = code.trim().toUpperCase();
+    if (/^\d{4}$/.test(str)) {
+      return `MARS-${str}`;
+    }
+    return str.replace(/[^A-Z0-9-]/g, '');
   }
 
   // --- Host: Create Waiting Room (Up to 6 Players) ---
   createRoom(roomCode, password = '', playerName = 'Commander Unit-01') {
     const PeerClass = this._getPeerConstructor();
     if (!PeerClass) {
-      this.onStatus('MULTIPLAYER: PEER SUBSYSTEM INITIALIZING...');
+      this.onStatus('MULTIPLAYER: INITIALIZING PEER SUBSYSTEM...');
       return;
     }
 
     this.isHost = true;
     this.inGame = false;
     this.localPlayerName = playerName.trim() || 'Commander Unit-01';
-    this.roomCode = (roomCode || `MARS-${Math.floor(1000 + Math.random() * 9000)}`).toUpperCase();
+    this.mySlotIndex = 0;
+    this.roomCode = this._normalizeRoomCode(roomCode || `MARS-${Math.floor(1000 + Math.random() * 9000)}`);
     this.roomPassword = password.trim();
 
     this.roster = [
@@ -295,12 +374,17 @@ export class MarsMultiplayer {
     this.myPeerId = 'host';
     this.onStatus(`CREATING EXPEDITION ROOM [${this.roomCode}]...`);
 
+    if (this.onRoomCodeChanged) {
+      this.onRoomCodeChanged(this.roomCode);
+    }
+
     if (this.peer) this.peer.destroy();
-    this.peer = new PeerClass(peerId, { debug: 1 });
+    this.peer = new PeerClass(peerId, PEER_STUN_CONFIG);
 
     this.peer.on('open', (id) => {
-      this.onStatus(`WAITING ROOM ACTIVE // CODE: ${this.roomCode}`);
+      this.onStatus(`EXPEDITION ROOM [${this.roomCode}] ONLINE // WAITING FOR TEAM`);
       if (this.onRosterUpdated) this.onRosterUpdated(this.roster);
+      if (this.onRoomCodeChanged) this.onRoomCodeChanged(this.roomCode);
     });
 
     this.peer.on('connection', (conn) => {
@@ -310,11 +394,11 @@ export class MarsMultiplayer {
     this.peer.on('error', (err) => {
       console.warn('Host peer error:', err);
       if (err.type === 'unavailable-id') {
-        this.onStatus(`ROOM [${this.roomCode}] OCCUPIED. GENERATING NEW ROOM CODE...`);
         const newCode = `MARS-${Math.floor(1000 + Math.random() * 9000)}`;
+        this.onStatus(`ROOM OCCUPIED. ASSIGNING FRESH CODE [${newCode}]...`);
         this.createRoom(newCode, password, playerName);
       } else {
-        this.onStatus(`SIGNAL WARNING: ${err.type || 'RECONNECTING'}`);
+        this.onStatus(`NETWORK NOTICE: ${err.type || 'RECONNECTING'}`);
       }
     });
 
@@ -364,6 +448,7 @@ export class MarsMultiplayer {
         conn.send({
           type: 'auth_ok',
           yourPeerId: conn.peer,
+          yourSlot: slot,
           roster: this.roster,
           roomCode: this.roomCode
         });
@@ -375,8 +460,21 @@ export class MarsMultiplayer {
         });
 
         this.isConnected = true;
-        this.onStatus(`EXPLORER [${clientName.toUpperCase()}] JOINED WAITING ROOM!`);
+        this.onStatus(`EXPLORER [${clientName.toUpperCase()}] JOINED EXPEDITION!`);
         if (this.onRosterUpdated) this.onRosterUpdated(this.roster);
+
+        // If game is ALREADY in progress, immediately deploy late-joining teammate into active expedition!
+        if (this.inGame) {
+          conn.send({ type: 'start_game' });
+          if (this.itemsManager) {
+            const collectedIds = this.itemsManager.items
+              .filter(i => i.collected)
+              .map(i => i.id);
+            if (collectedIds.length > 0) {
+              conn.send({ type: 'sync_collected', ids: collectedIds });
+            }
+          }
+        }
       } else {
         this._handleGamePacket(data, conn.peer);
       }
@@ -398,12 +496,12 @@ export class MarsMultiplayer {
         peerId: conn.peer
       });
 
-      this.onStatus(`EXPLORER [${name.toUpperCase()}] LEFT EXPEDITION`);
+      this.onStatus(`EXPLORER [${name.toUpperCase()}] DISCONNECTED`);
       if (this.onRosterUpdated) this.onRosterUpdated(this.roster);
     });
 
     conn.on('error', (err) => {
-      console.warn('Host connection error:', err);
+      console.warn('Host connection warning:', err);
     });
   }
 
@@ -411,26 +509,34 @@ export class MarsMultiplayer {
   joinRoom(roomCode, password = '', playerName = 'Explorer Unit-02') {
     const PeerClass = this._getPeerConstructor();
     if (!PeerClass) {
-      this.onStatus('MULTIPLAYER: PEER SUBSYSTEM INITIALIZING...');
+      this.onStatus('MULTIPLAYER: INITIALIZING PEER SUBSYSTEM...');
       return;
     }
 
     this.isHost = false;
     this.inGame = false;
     this.localPlayerName = playerName.trim() || 'Explorer Unit-02';
-    this.roomCode = (roomCode || '').trim().toUpperCase();
+    this.roomCode = this._normalizeRoomCode(roomCode || '');
     this.roomPassword = password.trim();
+    this.joinRetryCount = 0;
 
     this.roster = [
       { id: 'self', name: this.localPlayerName, isHost: false, slot: 1, profile: EXPLORER_PROFILES[1] }
     ];
     this._clearRemotePlayers();
 
+    this._attemptJoin();
+  }
+
+  _attemptJoin() {
+    const PeerClass = this._getPeerConstructor();
+    if (!PeerClass) return;
+
     const targetPeerId = `mars-prov-${this.roomCode.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
     this.onStatus(`CONNECTING TO ROOM [${this.roomCode}]...`);
 
     if (this.peer) this.peer.destroy();
-    this.peer = new PeerClass({ debug: 1 });
+    this.peer = new PeerClass(PEER_STUN_CONFIG);
 
     this.peer.on('open', (myId) => {
       this.myPeerId = myId;
@@ -439,9 +545,15 @@ export class MarsMultiplayer {
     });
 
     this.peer.on('error', (err) => {
-      console.warn('Client peer join error:', err);
-      this.onStatus(`JOIN FAILED: ROOM [${this.roomCode}] NOT REACHABLE`);
-      if (this.onRoomClosed) this.onRoomClosed(`ROOM [${this.roomCode}] NOT FOUND`);
+      console.warn('Client peer join warning:', err);
+      if (this.joinRetryCount < this.maxJoinRetries) {
+        this.joinRetryCount++;
+        this.onStatus(`CONNECTING TO HOST... ATTEMPT ${this.joinRetryCount + 1}/${this.maxJoinRetries + 1}`);
+        setTimeout(() => this._attemptJoin(), 1200);
+      } else {
+        this.onStatus(`ROOM [${this.roomCode}] NOT REACHABLE`);
+        if (this.onRoomClosed) this.onRoomClosed(`ROOM [${this.roomCode}] NOT REACHABLE`);
+      }
     });
 
     if (this.onRosterUpdated) this.onRosterUpdated(this.roster);
@@ -450,14 +562,19 @@ export class MarsMultiplayer {
   _setupClientConnection() {
     if (!this.conn) return;
 
-    this.conn.on('open', () => {
-      // Send handshake auth
+    const sendAuth = () => {
       this.conn.send({
         type: 'auth',
         password: this.roomPassword,
         playerName: this.localPlayerName
       });
-    });
+    };
+
+    if (this.conn.open) {
+      sendAuth();
+    } else {
+      this.conn.on('open', sendAuth);
+    }
 
     this.conn.on('data', (data) => {
       if (!data || !data.type) return;
@@ -465,10 +582,11 @@ export class MarsMultiplayer {
       if (data.type === 'auth_ok') {
         this.isConnected = true;
         this.myPeerId = data.yourPeerId || this.myPeerId;
+        this.mySlotIndex = data.yourSlot || 1;
         this.roster = data.roster || [];
         this._syncRosterRovers(this.roster);
 
-        this.onStatus('JOINED WAITING ROOM! WAITING FOR HOST TO START...');
+        this.onStatus('JOINED EXPEDITION! WAITING FOR COMMANDER TO LAUNCH...');
         if (this.onRosterUpdated) this.onRosterUpdated(this.roster);
       } else if (data.type === 'auth_fail') {
         this.isConnected = false;
@@ -482,8 +600,21 @@ export class MarsMultiplayer {
         this._removeRemotePlayer(data.peerId);
       } else if (data.type === 'start_game') {
         this.inGame = true;
-        this.onStatus('EXPEDITION LAUNCHED BY COMMANDER! DEPLOYING...');
+        this.onStatus('EXPEDITION LAUNCHED! DEPLOYING ON MARS...');
         if (this.onGameStart) this.onGameStart();
+      } else if (data.type === 'sync_collected') {
+        if (this.itemsManager && Array.isArray(data.ids)) {
+          data.ids.forEach(id => {
+            const it = this.itemsManager.items.find(i => i.id === id);
+            if (it && !it.collected) {
+              it.collected = true;
+              if (it.mesh) it.mesh.visible = false;
+              if (it.light) it.light.visible = false;
+              if (it.ring) it.ring.visible = false;
+              if (it.beam) it.beam.visible = false;
+            }
+          });
+        }
       } else if (data.type === 'room_closed') {
         this.isConnected = false;
         this.onStatus(`ROOM CLOSED: ${data.reason || 'HOST DISBANDED'}`);
@@ -501,7 +632,7 @@ export class MarsMultiplayer {
     });
 
     this.conn.on('error', (err) => {
-      console.warn('Client connection error:', err);
+      console.warn('Client connection warning:', err);
     });
   }
 
@@ -518,6 +649,7 @@ export class MarsMultiplayer {
   startGame() {
     if (!this.isHost) return;
     this.inGame = true;
+    this.isConnected = true;
     this._broadcastPacket({ type: 'start_game' });
     this.onStatus('LAUNCHING ACIDALIA EXPEDITION...');
     if (this.onGameStart) this.onGameStart();
@@ -591,7 +723,7 @@ export class MarsMultiplayer {
       // Do not process our own reflected state
       if (peerId === this.myPeerId || (this.isHost && peerId === 'host')) return;
 
-      const player = this._getOrCreateRemotePlayer(peerId, data.name || 'Explorer');
+      const player = this._getOrCreateRemotePlayer(peerId, data.name || 'Explorer', data.slot);
       player.targetPos.set(data.x, data.y, data.z);
       player.targetHeading = data.heading;
       player.targetPitch = data.pitch;
@@ -647,7 +779,7 @@ export class MarsMultiplayer {
   update(dt) {
     const now = performance.now();
 
-    // 1. Periodic Real Ping Heartbeat (Every 1200ms)
+    // 1. Periodic Real Ping Heartbeat
     if (now - this.lastPingSentTime >= this.pingInterval) {
       this.lastPingSentTime = now;
       this._pingPacket.t = now;
@@ -666,12 +798,13 @@ export class MarsMultiplayer {
     }
 
     // 2. Outbound throttled telemetry broadcast (Zero-allocation: 50ms = 20 updates/s)
-    if (this.inGame && this.isConnected) {
+    if (this.inGame) {
       if (now - this.lastBroadcastTime >= this.broadcastInterval) {
         this.lastBroadcastTime = now;
         const pkt = this._telemetryPacket;
         pkt.id = this.myPeerId;
         pkt.name = this.localPlayerName;
+        pkt.slot = this.mySlotIndex;
         pkt.x = Math.round(this.localRover.position.x * 100) / 100;
         pkt.y = Math.round(this.localRover.position.y * 100) / 100;
         pkt.z = Math.round(this.localRover.position.z * 100) / 100;
@@ -682,7 +815,7 @@ export class MarsMultiplayer {
       }
     }
 
-    // Smoothly interpolate all remote rovers in the 3D scene (zero stutter)
+    // Smoothly interpolate all remote rovers in the 3D scene (Zero stutter)
     this.remotePlayers.forEach(player => {
       if (player.group && player.group.visible) {
         player.group.position.lerp(player.targetPos, Math.min(1.0, dt * 14.0));

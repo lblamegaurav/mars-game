@@ -230,7 +230,8 @@ class MarsGame {
       this.scene,
       this.terrain,
       this.rover,
-      (status) => this.ui.showToast(status)
+      (status) => this.ui.showToast(status),
+      this.multiplayer
     );
 
     // 9. Initial Terrain & Position
@@ -255,26 +256,6 @@ class MarsGame {
     this.topPingDisplay = document.getElementById('top-ping-badge');
     this._animateBound = this._animate.bind(this);
     window.addEventListener('resize', () => this._onWindowResize());
-
-    // 12. Right-Side Rover Optical Mast Live Camera Feed (Ultra-low draw call HazCam pass)
-    this.feedCamera = new THREE.PerspectiveCamera(65, 280 / 155, 0.4, 45); // Far clipped to 45m (only 6-10 draw calls!)
-    const feedCanvas = document.getElementById('camera-feed-canvas');
-    this.feedRenderer = null;
-    if (feedCanvas) {
-      this.feedRenderer = new THREE.WebGLRenderer({
-        canvas: feedCanvas,
-        antialias: false,
-        precision: 'lowp',
-        depth: true,
-        stencil: false,
-        powerPreference: 'high-performance' // Harmonized with main renderer to prevent multi-GPU context conflict
-      });
-      this.feedRenderer.setSize(280, 155, false);
-      this.feedRenderer.setPixelRatio(1.0);
-      this.feedRenderer.shadowMap.enabled = false;
-      this.feedRenderer.toneMapping = THREE.ACESFilmicToneMapping;
-      this.feedRenderer.toneMappingExposure = 0.95;
-    }
 
     // Pre-compile all shaders upfront to eliminate shader compilation hitches during gameplay (Pillar 3)
     this.renderer.compile(this.scene, this.camera);
@@ -447,6 +428,11 @@ class MarsGame {
     // Wire multiplayer callbacks
     this.multiplayer.onRosterUpdated = (roster) => {
       updateRosterUI(roster);
+    };
+
+    this.multiplayer.onRoomCodeChanged = (newCode) => {
+      if (displayCode) displayCode.textContent = newCode;
+      if (wrRoomCode) wrRoomCode.textContent = newCode;
     };
 
     this.multiplayer.onGameStart = () => {
@@ -789,26 +775,7 @@ class MarsGame {
     // 8. Render Main 3D Scene Frame
     this.renderer.render(this.scene, this.camera);
 
-    // 9. Render Live Rover Mast Camera Feed (Ultra-lightweight 45m near-clip, throttled to 15 FPS scan rate)
-    if (this.cameraMode === 0 && this.feedRenderer && this.ui.isWakeComplete) {
-      if (this.frameCount % 4 === 0) { // ~15 FPS scan rate: authentic interplanetary rover HazCam rate
-        const fwdX = -Math.sin(this.rover.heading);
-        const fwdZ = -Math.cos(this.rover.heading);
-        this.feedCamera.position.set(
-          this.rover.position.x + fwdX * 0.45,
-          this.rover.position.y + 1.82,
-          this.rover.position.z + fwdZ * 0.45
-        );
-        this.feedCamera.lookAt(
-          this.feedCamera.position.x + fwdX * 35.0,
-          this.feedCamera.position.y - 1.2,
-          this.feedCamera.position.z + fwdZ * 35.0
-        );
-        this.feedRenderer.render(this.scene, this.feedCamera);
-      }
-    }
-
-    // 10. Render Floating Collected 3D GLBs (Pure rotating 3D models)
+    // 9. Render Floating Collected 3D GLBs (Pure rotating 3D models)
     if (this.artifactsViewer) {
       this.artifactsViewer.update(dt);
     }

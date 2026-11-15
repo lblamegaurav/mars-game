@@ -2,11 +2,12 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
 export class MarsGLBManager {
-  constructor(scene, terrain, rover, onStatusUpdate) {
+  constructor(scene, terrain, rover, onStatusUpdate, multiplayer = null) {
     this.scene = scene;
     this.terrain = terrain;
     this.rover = rover;
     this.onStatusUpdate = onStatusUpdate;
+    this.multiplayer = multiplayer;
 
     this.loader = new GLTFLoader();
     this.totalToLoad = 2;
@@ -129,6 +130,10 @@ export class MarsGLBManager {
 
     if (this.rover) {
       this.rover.setGLBModel(roverContainer);
+    }
+
+    if (this.multiplayer) {
+      this.multiplayer.setRoverModelTemplate(model);
     }
   }
 
