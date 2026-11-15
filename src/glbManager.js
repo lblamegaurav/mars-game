@@ -71,8 +71,7 @@ export class MarsGLBManager {
       },
       undefined,
       (err) => {
-        console.warn('Could not load curiosity_rover.glb, falling back to mars_rover.glb:', err);
-        this.loader.load('/models/mars_rover.glb', (gltf2) => this._setupCuriosityRover(gltf2));
+        console.warn('Could not load curiosity_rover.glb:', err);
       }
     );
 
@@ -109,9 +108,9 @@ export class MarsGLBManager {
     box.setFromObject(model);
     box.getCenter(center);
 
-    // Center pivot horizontally, position bottom of wheels on ground
+    // Center pivot horizontally, position bottom of wheels firmly in contact with sand surface
     model.position.x = -center.x;
-    model.position.y = -box.min.y + 0.08;
+    model.position.y = -box.min.y - 0.05;
     model.position.z = -center.z;
 
     model.traverse((child) => {

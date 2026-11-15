@@ -245,8 +245,8 @@ class MarsGame {
     this.topFpsDisplay = document.getElementById('top-fps-badge');
     window.addEventListener('resize', () => this._onWindowResize());
 
-    // 12. Right-Side Rover Optical Mast Live Camera Feed (Image 4 Optimization, Zero FPS Drop)
-    this.feedCamera = new THREE.PerspectiveCamera(65, 280 / 155, 0.2, 1600);
+    // 12. Right-Side Rover Optical Mast Live Camera Feed (Optimized for Mobile/Low-End Hardware)
+    this.feedCamera = new THREE.PerspectiveCamera(65, 280 / 155, 0.5, 300);
     const feedCanvas = document.getElementById('camera-feed-canvas');
     this.feedRenderer = null;
     if (feedCanvas) {
@@ -256,6 +256,8 @@ class MarsGame {
         powerPreference: 'low-power'
       });
       this.feedRenderer.setSize(280, 155, false);
+      this.feedRenderer.setPixelRatio(1.0);
+      this.feedRenderer.shadowMap.enabled = false; // Disable heavy shadow passes on secondary viewport
       this.feedRenderer.toneMapping = THREE.ACESFilmicToneMapping;
       this.feedRenderer.toneMappingExposure = 0.95;
     }
@@ -636,9 +638,9 @@ class MarsGame {
 
     if (this.cameraMode === 0) {
       // --- Mode 0: Cinematic Dune Follow (Full Horizontal & Vertical Orbital Axis) ---
-      // Dynamically arc camera based on vertical pitch
-      const offsetDist = Math.max(5.0, 10.8 * Math.cos(pitch * 0.65));
-      const offsetHeight = 3.4 + pitch * 7.5;
+      // Dynamically arc camera based on vertical pitch with balanced framing
+      const offsetDist = Math.max(6.0, 9.8 * Math.cos(pitch * 0.65));
+      const offsetHeight = 3.2 - pitch * 6.0;
 
       targetCamPos.set(
         roverPos.x + Math.sin(roverHeading) * offsetDist,
@@ -647,16 +649,16 @@ class MarsGame {
       );
 
       // Prevent camera from clipping through terrain height
-      const camTerrainH = this.terrain.getHeight(targetCamPos.x, targetCamPos.z) + 1.35;
+      const camTerrainH = this.terrain.getHeight(targetCamPos.x, targetCamPos.z) + 1.2;
       if (targetCamPos.y < camTerrainH) {
         targetCamPos.y = camTerrainH;
       }
 
-      // Look direction smoothly tilts up to starry nebula sky or down to dunes
+      // Look direction smoothly tracks rover with vertical tilt
       targetLookAt.set(
-        roverPos.x - Math.sin(roverHeading) * 12.0,
-        roverPos.y + 1.8 - pitch * 14.0,
-        roverPos.z - Math.cos(roverHeading) * 12.0
+        roverPos.x - Math.sin(roverHeading) * 6.0,
+        roverPos.y + 1.0 + pitch * 8.0,
+        roverPos.z - Math.cos(roverHeading) * 6.0
       );
 
       // Smooth damped lerp
@@ -764,9 +766,9 @@ class MarsGame {
       this.artifactsViewer.update(dt);
     }
 
-    // 10. Render Live Rover Mast Camera Feed (Image 4 Optimization - throttled every 2nd frame for 0 FPS impact)
-    if (this.feedRenderer && this.feedCamera && this.ui.isWakeComplete) {
-      if (this.frameCount % 2 === 0) {
+    // 10. Render Live Rover Mast Camera Feed (Throttled to 12 FPS transmission rate, TPP only, zero shadow cost)
+    if (this.cameraMode === 0 && this.feedRenderer && this.feedCamera && this.ui.isWakeComplete) {
+      if (this.frameCount % 5 === 0) {
         const fwdX = -Math.sin(this.rover.heading);
         const fwdZ = -Math.cos(this.rover.heading);
         this.feedCamera.position.set(

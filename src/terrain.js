@@ -321,10 +321,17 @@ export class MarsTerrain {
     });
   }
 
-  // Update chunks around the rover's position
+  // Update chunks around the rover's position (only re-computes on chunk transitions)
   update(roverX, roverZ) {
     const centerChunkX = Math.floor(roverX / this.chunkSize);
     const centerChunkZ = Math.floor(roverZ / this.chunkSize);
+
+    // Skip all allocations and calculations if rover is in the same chunk
+    if (this.lastCenterChunkX === centerChunkX && this.lastCenterChunkZ === centerChunkZ) {
+      return;
+    }
+    this.lastCenterChunkX = centerChunkX;
+    this.lastCenterChunkZ = centerChunkZ;
 
     const neededKeys = new Set();
 
@@ -402,7 +409,7 @@ export class MarsTerrain {
       return (seed - 1) / 2147483646;
     };
 
-    const numRocks = Math.floor(pseudoRand() * 6) + 4; // 4 to 9 boulders per chunk
+    const numRocks = Math.floor(pseudoRand() * 2) + 2; // 2 to 3 boulders per chunk (optimized for 60 FPS)
     for (let i = 0; i < numRocks; i++) {
       const rx = (cx + pseudoRand() - 0.5) * this.chunkSize;
       const rz = (cz + pseudoRand() - 0.5) * this.chunkSize;
@@ -415,22 +422,16 @@ export class MarsTerrain {
       const isSmall = (i % 2 === 0);
       const scale = isSmall ? (0.25 + pseudoRand() * 0.25) : (0.75 + pseudoRand() * 0.85);
 
-      // Natural weathered icosahedron rock
-      const rockGeom = new THREE.IcosahedronGeometry(scale, 1);
-      // Soft vertex distortion for natural desert rock shaping
-      const pos = rockGeom.attributes.position;
-      for (let v = 0; v < pos.count; v++) {
-        pos.setX(v, pos.getX(v) * (0.85 + pseudoRand() * 0.3));
-        pos.setY(v, pos.getY(v) * (0.80 + pseudoRand() * 0.35));
-        pos.setZ(v, pos.getZ(v) * (0.85 + pseudoRand() * 0.3));
-      }
-      rockGeom.computeVertexNormals();
+      // Natural weathered icosahedron rock (subdivision 0 for performance)
+      const rockGeom = new THREE.IcosahedronGeometry(scale, 0);
 
       const rock = new THREE.Mesh(rockGeom, this.rockMaterial);
       rock.position.set(rx, ry + scale * 0.3, rz);
       rock.rotation.set(pseudoRand() * Math.PI, pseudoRand() * Math.PI, pseudoRand() * Math.PI);
       rock.castShadow = false; // Background rocks don't need expensive shadow map passes
       rock.receiveShadow = true;
+      rock.matrixAutoUpdate = false;
+      rock.updateMatrix();
       rocksGroup.add(rock);
     }
 

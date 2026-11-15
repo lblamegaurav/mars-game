@@ -229,7 +229,7 @@ export class MarsRover {
 
     wheelOffsets.forEach((cfg, idx) => {
       const steerPivot = new THREE.Group();
-      steerPivot.position.set(cfg.x, 0.55, cfg.z);
+      steerPivot.position.set(cfg.x, 0.48, cfg.z);
       this.group.add(steerPivot);
 
       if (cfg.isFront) this.frontSteerAssemblies.push(steerPivot);
@@ -435,21 +435,15 @@ export class MarsRover {
     const hLeft = this.terrain.getHeight(leftX, leftZ);
     const hRight = this.terrain.getHeight(rightX, rightZ);
 
-    // Calculate maximum wheel contact height to ensure wheels always ride on the surface
-    const surfaceContactHeight = Math.max(
-      hCenter,
-      (hFront + hRear) * 0.5,
-      (hLeft + hRight) * 0.5,
-      hFront,
-      hRear
-    ) + 0.14; // Suspension clearance buffer prevents wheel clipping into sand mesh
+    // Calculate true wheel ground contact height (eliminates hovering/floating gap)
+    const avgWheelContact = (hCenter * 2.0 + hFront + hRear + hLeft + hRight) / 6.0;
+    const surfaceContactHeight = avgWheelContact - 0.04; // Tires sink naturally into Martian regolith
 
-    // Immediate anti-burrow protection: rover can NEVER sink below the terrain surface
-    if (this.position.y < surfaceContactHeight) {
-      this.position.y = surfaceContactHeight;
+    // Realistic suspension damping: rover firmly hugs terrain surface without floating
+    if (this.position.y < surfaceContactHeight - 0.08) {
+      this.position.y = surfaceContactHeight - 0.08;
     } else {
-      // Smoothly settle downward with snappy suspension lerp
-      this.position.y += (surfaceContactHeight - this.position.y) * Math.min(1.0, dt * 18.0);
+      this.position.y += (surfaceContactHeight - this.position.y) * Math.min(1.0, dt * 20.0);
     }
 
     // Pitch & Roll angles

@@ -464,12 +464,15 @@ export class MarsUI {
       this.rover.steerAngle
     );
 
-    // 7. Update Telemetry Waveform Charts (Image 2 Restoration)
-    this._renderTelemetryCharts(dt);
-
-    // 8. Update Speedometer & Fuel Gauge (Image 2 & 3)
+    // 7. Optimized 2D Canvas Updates (Alternated across frames for 60 FPS smoothness)
+    this.uiFrameCount = (this.uiFrameCount || 0) + 1;
+    if (this.uiFrameCount % 2 === 0) {
+      this._renderTelemetryCharts(dt * 2.0);
+    }
     const currentSpeedKmh = parseFloat(kmh) || 0;
-    this._renderSpeedometer(currentSpeedKmh);
+    if (this.uiFrameCount % 2 === 1) {
+      this._renderSpeedometer(currentSpeedKmh);
+    }
     this._updateFuel(dt, currentSpeedKmh);
   }
 

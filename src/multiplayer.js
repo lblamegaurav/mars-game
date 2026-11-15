@@ -80,9 +80,9 @@ export class MarsMultiplayer {
     this.wheelGeom.rotateZ(Math.PI / 2);
     this.wheelMat = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 0.95 });
 
-    // Throttle outbound telemetry (~25 updates/sec = 40ms)
+    // Throttle outbound telemetry (~20 updates/sec = 50ms, optimized for mobile/low network load)
     this.lastBroadcastTime = 0;
-    this.broadcastInterval = 40;
+    this.broadcastInterval = 50;
   }
 
   // Build a distinct visual 3D rover mesh for a remote peer
@@ -99,7 +99,7 @@ export class MarsMultiplayer {
     });
     const bodyGeom = new THREE.BoxGeometry(2.4, 0.7, 3.2);
     const body = new THREE.Mesh(bodyGeom, chassisMat);
-    body.position.y = 0.8;
+    body.position.y = 0.74;
     body.castShadow = true;
     body.receiveShadow = true;
     group.add(body);
@@ -108,31 +108,31 @@ export class MarsMultiplayer {
     const stripeMat = new THREE.MeshBasicMaterial({ color: profile.glowHex });
     const stripeGeom = new THREE.BoxGeometry(2.44, 0.08, 0.6);
     const stripe = new THREE.Mesh(stripeGeom, stripeMat);
-    stripe.position.set(0, 0.85, 0.4);
+    stripe.position.set(0, 0.79, 0.4);
     group.add(stripe);
 
     // Sensor mast
     const mastGeom = new THREE.CylinderGeometry(0.07, 0.07, 1.4, 8);
     const mast = new THREE.Mesh(mastGeom, chassisMat);
-    mast.position.set(0.4, 1.7, -1.0);
+    mast.position.set(0.4, 1.64, -1.0);
     group.add(mast);
 
     // Luminous Beacon Light & Orb
     const beaconLight = new THREE.PointLight(profile.glowHex, 4.5, 30, 1.5);
-    beaconLight.position.set(0.4, 2.4, -1.0);
+    beaconLight.position.set(0.4, 2.34, -1.0);
     group.add(beaconLight);
 
     const beaconGeom = new THREE.SphereGeometry(0.18, 10, 10);
     const beaconMat = new THREE.MeshBasicMaterial({ color: profile.glowHex });
     const beaconMesh = new THREE.Mesh(beaconGeom, beaconMat);
-    beaconMesh.position.set(0.4, 2.4, -1.0);
+    beaconMesh.position.set(0.4, 2.34, -1.0);
     group.add(beaconMesh);
 
-    // 6 Wheels
+    // 6 Wheels (Tires firmly touching sand surface, no hovering gap)
     const wheelOffsets = [
-      [-1.4, 0.5, -1.2], [1.4, 0.5, -1.2],
-      [-1.5, 0.48, 0.0],  [1.5, 0.48, 0.0],
-      [-1.4, 0.5, 1.2],  [1.4, 0.5, 1.2]
+      [-1.4, 0.44, -1.2], [1.4, 0.44, -1.2],
+      [-1.5, 0.42, 0.0],  [1.5, 0.42, 0.0],
+      [-1.4, 0.44, 1.2],  [1.4, 0.44, 1.2]
     ];
     wheelOffsets.forEach(pos => {
       const w = new THREE.Mesh(this.wheelGeom, this.wheelMat);
