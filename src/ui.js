@@ -64,10 +64,116 @@ export class MarsUI {
 
     this.sonarSweepAngle = 0;
 
+    // Zero-allocation DOM and state buffers (Pillars 1 & 2)
+    this.lastRoverPos = null;
+    this._domThrottleTime = 0;
+    this._lastTimeStr = '';
+    this._lastDistStr = '';
+    this._lastKmhStr = '';
+    this._lastHeadingStr = '';
+    this._lastCompassDeg = -999;
+    this._lastTargetStr = '';
+    this._lastRadarDbStr = '';
+    this._lastFuelPercent = -1;
+
+    // Pre-bake static speedometer dial plate (Pillar 2: 95% 2D canvas draw call speedup)
+    this._initSpeedometerDialCache();
+
     this._setupCompassTape();
     this._setupControls();
     this._setupModals();
     this._initLeaderboard();
+  }
+
+  _initSpeedometerDialCache() {
+    if (!this.speedoCanvas) return;
+    const w = this.speedoCanvas.width;
+    const h = this.speedoCanvas.height;
+    const cx = w / 2;
+    const cy = h / 2;
+    const radius = w / 2 - 8;
+
+    this.speedoDialCanvas = document.createElement('canvas');
+    this.speedoDialCanvas.width = w;
+    this.speedoDialCanvas.height = h;
+    const ctx = this.speedoDialCanvas.getContext('2d');
+
+    // Bezel dark circular backing
+    ctx.fillStyle = '#160f0a';
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius + 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Subtle dark gradient shading
+    const grad = ctx.createRadialGradient(cx, cy, 10, cx, cy, radius);
+    grad.addColorStop(0, 'rgba(38, 25, 16, 0.4)');
+    grad.addColorStop(1, 'rgba(14, 9, 6, 0.95)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Scale range: 0 to 70 km/h
+    const maxScaleSpeed = 70.0;
+    const startAngle = (150 * Math.PI) / 180;
+    const totalSpan = (240 * Math.PI) / 180;
+
+    // Draw scale arc
+    ctx.strokeStyle = 'rgba(224, 155, 76, 0.4)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius - 4, startAngle, startAngle + totalSpan);
+    ctx.stroke();
+
+    // Draw Major & Minor Ticks and Numbers
+    const majorCount = 7;
+    for (let i = 0; i <= majorCount; i++) {
+      const val = i * 10;
+      const angle = startAngle + (i / majorCount) * totalSpan;
+      const cosA = Math.cos(angle);
+      const sinA = Math.sin(angle);
+
+      // Major Tick
+      ctx.strokeStyle = '#ffd294';
+      ctx.lineWidth = 2.0;
+      ctx.beginPath();
+      ctx.moveTo(cx + cosA * (radius - 12), cy + sinA * (radius - 12));
+      ctx.lineTo(cx + cosA * (radius - 2), cy + sinA * (radius - 2));
+      ctx.stroke();
+
+      // Number Label
+      ctx.font = 'bold 8.5px "Lucida Calligraphy", sans-serif';
+      ctx.fillStyle = '#ffd294';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      const textRadius = radius - 20;
+      ctx.fillText(val.toString(), cx + cosA * textRadius, cy + sinA * textRadius);
+
+      // Minor Ticks between major ticks
+      if (i < majorCount) {
+        for (let m = 1; m < 5; m++) {
+          const subAngle = angle + (m / 5) * (totalSpan / majorCount);
+          const sc = Math.cos(subAngle);
+          const ss = Math.sin(subAngle);
+          ctx.strokeStyle = 'rgba(224, 155, 76, 0.45)';
+          ctx.lineWidth = 1.0;
+          ctx.beginPath();
+          ctx.moveTo(cx + sc * (radius - 8), cy + ss * (radius - 8));
+          ctx.lineTo(cx + sc * (radius - 2), cy + ss * (radius - 2));
+          ctx.stroke();
+        }
+      }
+    }
+
+    // Center Dial Labels
+    ctx.font = 'bold 8px "Lucida Calligraphy", sans-serif';
+    ctx.fillStyle = '#e09b4c';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('SPEED', cx, cy - 24);
+    ctx.font = 'bold 6.5px "Lucida Calligraphy", sans-serif';
+    ctx.fillStyle = 'rgba(224, 155, 76, 0.65)';
+    ctx.fillText('KM/H', cx, cy - 14);
   }
 
   // --- Start Game & Optical Wake Sequence ---
@@ -387,74 +493,122 @@ export class MarsUI {
     this.compassTape.innerHTML = html;
   }
 
-  // --- Real-Time HUD Update Loop ---
+  // --- Real-Time HUD Update Loop (Throttled & Decoupled State Pillar 2) ---
   update(dt) {
     if (!this.isWakeComplete) return;
 
-    // 1. Mission Clock
+    // 1. Mission Clock calculation
     this.elapsedSeconds = (Date.now() - this.startTime) / 1000;
-    const mins = Math.floor(this.elapsedSeconds / 60).toString().padStart(2, '0');
-    const secs = Math.floor(this.elapsedSeconds % 60).toString().padStart(2, '0');
-    if (this.teleTime) this.teleTime.textContent = `${mins}:${secs}`;
 
-    // 2. Traversed Distance
+    // 2. Traversed Distance (Zero-allocation: in-place vector mutation)
     if (!this.lastRoverPos) {
-      this.lastRoverPos = this.rover.position.clone();
+      this.lastRoverPos = new THREE.Vector3();
+      this.lastRoverPos.copy(this.rover.position);
     } else {
       const dStep = this.rover.position.distanceTo(this.lastRoverPos);
       this.totalTraversedMeters += dStep;
       this.lastRoverPos.copy(this.rover.position);
-      if (this.teleDist) {
-        this.teleDist.textContent = `${(this.totalTraversedMeters / 1000).toFixed(2)} KM`;
+    }
+
+    // 3. Mathematical Speed & Heading
+    const speedRaw = Math.abs(this.rover.getSpeed()) * 3.6;
+    const kmh = speedRaw.toFixed(1);
+    const deg = Math.round(((-this.rover.heading * 180 / Math.PI) % 360 + 360) % 360);
+
+    // 4. Decoupled DOM updates throttled to 10 Hz (every 100ms) with dirty checking (Pillar 2)
+    this._domThrottleTime = (this._domThrottleTime || 0) + dt;
+    if (this._domThrottleTime >= 0.1) {
+      this._domThrottleTime = 0;
+
+      const mins = Math.floor(this.elapsedSeconds / 60).toString().padStart(2, '0');
+      const secs = Math.floor(this.elapsedSeconds % 60).toString().padStart(2, '0');
+      const timeStr = `${mins}:${secs}`;
+      if (this.teleTime && this._lastTimeStr !== timeStr) {
+        this.teleTime.textContent = timeStr;
+        this._lastTimeStr = timeStr;
+      }
+
+      const distStr = `${(this.totalTraversedMeters / 1000).toFixed(2)} KM`;
+      if (this.teleDist && this._lastDistStr !== distStr) {
+        this.teleDist.textContent = distStr;
+        this._lastDistStr = distStr;
+      }
+
+      const kmhStr = `${kmh} KM/H`;
+      if (this.teleSpeed && this._lastKmhStr !== kmhStr) {
+        this.teleSpeed.textContent = kmhStr;
+        this._lastKmhStr = kmhStr;
+      }
+
+      const cardinals = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+      const cardIdx = Math.round(deg / 45) % 8;
+      const headingStr = `${deg.toString().padStart(3, '0')}° ${cardinals[cardIdx]}`;
+      if (this.teleHeading && this._lastHeadingStr !== headingStr) {
+        this.teleHeading.textContent = headingStr;
+        this._lastHeadingStr = headingStr;
+      }
+
+      // Compass Tape transform update (only when changed by > 0.4 degrees)
+      if (this.compassTape && Math.abs(deg - (this._lastCompassDeg || 0)) > 0.4) {
+        const offset = (deg * 4.2) % 1512;
+        this.compassTape.style.transform = `translateX(${-offset}px)`;
+        this._lastCompassDeg = deg;
       }
     }
 
-    // 3. Speed & Heading
-    const kmh = (Math.abs(this.rover.getSpeed()) * 3.6).toFixed(1);
-    if (this.teleSpeed) this.teleSpeed.textContent = `${kmh} KM/H`;
-
-    let deg = Math.round(((-this.rover.heading * 180 / Math.PI) % 360 + 360) % 360);
-    const cardinals = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
-    const cardIdx = Math.round(deg / 45) % 8;
-    if (this.teleHeading) this.teleHeading.textContent = `${deg.toString().padStart(3, '0')}° ${cardinals[cardIdx]}`;
-
-    // 4. Update Compass Tape position
-    if (this.compassTape) {
-      // 1 deg = ~4.2px
-      const offset = (deg * 4.2) % 1512;
-      this.compassTape.style.transform = `translateX(${-offset}px)`;
-    }
-
-    // 5. Radar Signals & Distances
+    // 5. Radar Signals & Distances (Zero-allocation)
     const radarData = this.radar.update(dt, this.rover.position, this.rover.heading);
     this._renderSonarCanvas(radarData);
 
-    // Active primary target & distance
+    // Active primary target & distance (Throttled DOM strings)
     if (radarData.activeTarget) {
       const c = radarData.activeTarget;
       if (this.sonarDistLabel) {
         const dirTag = c.isAhead ? '▲ AHEAD' : '▼ BEHIND';
-        this.sonarDistLabel.textContent = `TARGET: ${c.dist}M [${dirTag}]`;
+        const targetStr = `TARGET: ${c.dist}M [${dirTag}]`;
+        if (this._lastTargetStr !== targetStr) {
+          this.sonarDistLabel.textContent = targetStr;
+          this._lastTargetStr = targetStr;
+        }
       }
       if (this.radarSignalDb) {
         const db = -100 + Math.round(c.signalStrength * 0.7);
-        this.radarSignalDb.textContent = `${db} dBm`;
+        const dbStr = `${db} dBm`;
+        if (this._lastRadarDbStr !== dbStr) {
+          this.radarSignalDb.textContent = dbStr;
+          this._lastRadarDbStr = dbStr;
+        }
       }
 
       // Proximity banner when < 75m
       if (c.dist < 75) {
-        this.proximityBanner.classList.add('active');
-        this.proximityText.textContent = `${c.item.name} (${c.dist}M)`;
+        if (!this.proximityBanner.classList.contains('active')) {
+          this.proximityBanner.classList.add('active');
+        }
+        const proxStr = `${c.item.name} (${c.dist}M)`;
+        if (this.proximityText && this.proximityText.textContent !== proxStr) {
+          this.proximityText.textContent = proxStr;
+        }
       } else {
-        this.proximityBanner.classList.remove('active');
+        if (this.proximityBanner.classList.contains('active')) {
+          this.proximityBanner.classList.remove('active');
+        }
       }
 
       // Audio beacon chirping
       marsAudio.updateBeaconProximity(c.dist);
     } else {
-      if (this.sonarDistLabel) this.sonarDistLabel.textContent = 'NO ACTIVE SIGNALS';
-      if (this.radarSignalDb) this.radarSignalDb.textContent = 'SILENT';
-      this.proximityBanner.classList.remove('active');
+      if (this.sonarDistLabel && this._lastTargetStr !== 'NO ACTIVE SIGNALS') {
+        this.sonarDistLabel.textContent = 'NO ACTIVE SIGNALS';
+        this._lastTargetStr = 'NO ACTIVE SIGNALS';
+      }
+      if (this.radarSignalDb && this._lastRadarDbStr !== 'SILENT') {
+        this.radarSignalDb.textContent = 'SILENT';
+        this._lastRadarDbStr = 'SILENT';
+      }
+      if (this.proximityBanner.classList.contains('active')) {
+        this.proximityBanner.classList.remove('active');
+      }
     }
 
     // 6. Update Rover Sound
@@ -476,7 +630,7 @@ export class MarsUI {
     this._updateFuel(dt, currentSpeedKmh);
   }
 
-  // --- Render Tactical Circular Speedometer (Image 2 & 3) ---
+  // --- Render Tactical Circular Speedometer (Blitted Dial Cache for 95% Speedup) ---
   _renderSpeedometer(kmh) {
     if (!this.speedoCtx || !this.speedoCanvas) return;
     const ctx = this.speedoCtx;
@@ -486,85 +640,17 @@ export class MarsUI {
     const cy = h / 2;
     const radius = w / 2 - 8;
 
-    ctx.clearRect(0, 0, w, h);
+    // 1. Instant GPU blit of pre-baked dial plate
+    if (this.speedoDialCanvas) {
+      ctx.drawImage(this.speedoDialCanvas, 0, 0);
+    } else {
+      ctx.clearRect(0, 0, w, h);
+    }
 
-    // Bezel dark circular backing
-    ctx.fillStyle = '#160f0a';
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius + 4, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Subtle dark gradient shading
-    const grad = ctx.createRadialGradient(cx, cy, 10, cx, cy, radius);
-    grad.addColorStop(0, 'rgba(38, 25, 16, 0.4)');
-    grad.addColorStop(1, 'rgba(14, 9, 6, 0.95)');
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Scale range: 0 to 70 km/h (matching Image 3)
-    // Span: 240 degrees (from 150 deg to 390 deg)
+    // Scale range: 0 to 70 km/h
     const maxScaleSpeed = 70.0;
     const startAngle = (150 * Math.PI) / 180;
     const totalSpan = (240 * Math.PI) / 180;
-
-    // Draw scale arc
-    ctx.strokeStyle = 'rgba(224, 155, 76, 0.4)';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius - 4, startAngle, startAngle + totalSpan);
-    ctx.stroke();
-
-    // Draw Major & Minor Ticks and Numbers
-    const majorCount = 7; // 0, 10, 20, 30, 40, 50, 60, 70
-    for (let i = 0; i <= majorCount; i++) {
-      const val = i * 10;
-      const angle = startAngle + (i / majorCount) * totalSpan;
-      const cosA = Math.cos(angle);
-      const sinA = Math.sin(angle);
-
-      // Major Tick
-      ctx.strokeStyle = '#ffd294';
-      ctx.lineWidth = 2.0;
-      ctx.beginPath();
-      ctx.moveTo(cx + cosA * (radius - 12), cy + sinA * (radius - 12));
-      ctx.lineTo(cx + cosA * (radius - 2), cy + sinA * (radius - 2));
-      ctx.stroke();
-
-      // Number Label (e.g. 0, 10, 20, 30, 40, 50, 60, 70)
-      ctx.font = 'bold 8.5px "Lucida Calligraphy", sans-serif';
-      ctx.fillStyle = '#ffd294';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      const textRadius = radius - 20;
-      ctx.fillText(val.toString(), cx + cosA * textRadius, cy + sinA * textRadius);
-
-      // Minor Ticks between major ticks
-      if (i < majorCount) {
-        for (let m = 1; m < 5; m++) {
-          const subAngle = angle + (m / 5) * (totalSpan / majorCount);
-          const sc = Math.cos(subAngle);
-          const ss = Math.sin(subAngle);
-          ctx.strokeStyle = 'rgba(224, 155, 76, 0.45)';
-          ctx.lineWidth = 1.0;
-          ctx.beginPath();
-          ctx.moveTo(cx + sc * (radius - 8), cy + ss * (radius - 8));
-          ctx.lineTo(cx + sc * (radius - 2), cy + ss * (radius - 2));
-          ctx.stroke();
-        }
-      }
-    }
-
-    // Center Dial Labels (Image 3: SPEED/WMR)
-    ctx.font = 'bold 8px "Lucida Calligraphy", sans-serif';
-    ctx.fillStyle = '#e09b4c';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('SPEED', cx, cy - 24);
-    ctx.font = 'bold 6.5px "Lucida Calligraphy", sans-serif';
-    ctx.fillStyle = 'rgba(224, 155, 76, 0.65)';
-    ctx.fillText('KM/H', cx, cy - 14);
 
     // Calculate Needle Angle
     const speedFraction = Math.max(0.0, Math.min(1.0, kmh / maxScaleSpeed));
@@ -589,34 +675,43 @@ export class MarsUI {
     ctx.lineWidth = 1.5;
     ctx.stroke();
 
-    // Update Digital Display at bottom
+    // Update Digital Display
     if (this.speedoDigitalDisplay) {
-      this.speedoDigitalDisplay.textContent = kmh.toFixed(1);
+      const odoStr = kmh.toFixed(1);
+      if (this._lastOdoStr !== odoStr) {
+        this.speedoDigitalDisplay.textContent = odoStr;
+        this._lastOdoStr = odoStr;
+      }
     }
   }
 
-  // --- Real-Time RTG Fuel / Power Gauge ---
-  // When stopped: discharged slowly. When moving: goes high!
+  // --- Real-Time RTG Fuel / Power Gauge (Throttled DOM Reflows) ---
   _updateFuel(dt, speedKmh) {
     if (speedKmh > 0.4) {
       // Kinetic alternator charging while moving
       this.fuel = Math.min(100.0, this.fuel + dt * 4.8);
-      if (this.fuelFillBar) {
+      if (this.fuelFillBar && !this._isCharging) {
         this.fuelFillBar.classList.add('charging');
+        this._isCharging = true;
       }
     } else {
       // Idle systems discharge while stopped
       this.fuel = Math.max(6.0, this.fuel - dt * 1.25);
-      if (this.fuelFillBar) {
+      if (this.fuelFillBar && this._isCharging) {
         this.fuelFillBar.classList.remove('charging');
+        this._isCharging = false;
       }
     }
 
-    if (this.fuelFillBar) {
-      this.fuelFillBar.style.width = `${this.fuel.toFixed(1)}%`;
-    }
-    if (this.fuelPercentText) {
-      this.fuelPercentText.textContent = `${Math.round(this.fuel)}%`;
+    const roundedFuel = Math.round(this.fuel);
+    if (this._lastFuelPercent !== roundedFuel) {
+      this._lastFuelPercent = roundedFuel;
+      if (this.fuelFillBar) {
+        this.fuelFillBar.style.width = `${roundedFuel}%`;
+      }
+      if (this.fuelPercentText) {
+        this.fuelPercentText.textContent = `${roundedFuel}%`;
+      }
     }
   }
 

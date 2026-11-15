@@ -164,6 +164,15 @@ export class MarsGLBManager {
       clone.position.set(mc.x, y + mc.yOffset, mc.z);
       clone.rotation.y = mc.rotY;
       clone.scale.setScalar(mc.scale);
+
+      // Disable matrix recalculation per frame for static horizon mountains (Pillar 3)
+      clone.matrixAutoUpdate = false;
+      clone.updateMatrix();
+      clone.traverse(child => {
+        child.matrixAutoUpdate = false;
+        child.updateMatrix();
+      });
+
       this.scene.add(clone);
       this.mountainInstances.push(clone);
     });

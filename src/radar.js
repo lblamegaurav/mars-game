@@ -12,6 +12,16 @@ export class MarsRadar {
     this.isScanning = false;
     this.scanRadius = 0;
     this.maxScanRadius = 750; // meters
+
+    // Zero-allocation pooled signals and reusable result object (Pillar 1)
+    this._pooledSignals = [];
+    this._radarResult = {
+      signals: this._pooledSignals,
+      closestItem: null,
+      forwardTarget: null,
+      activeTarget: null,
+      minDistance: 999999
+    };
   }
 
   _initSeismicPulse() {
@@ -58,43 +68,61 @@ export class MarsRadar {
       }
     }
 
-    // Calculate signals for all active items
-    const signals = [];
+    // Ensure signal pool matches items count (Zero Garbage Collection)
+    const items = this.itemsManager.items;
+    const count = items.length;
+    if (this._pooledSignals.length !== count) {
+      this._pooledSignals.length = 0;
+      for (let i = 0; i < count; i++) {
+        this._pooledSignals.push({
+          item: items[i],
+          dist: 0,
+          fwdDist: 0,
+          rightDist: 0,
+          signalStrength: 0,
+          isAhead: false,
+          active: false
+        });
+      }
+      this._radarResult.signals = this._pooledSignals;
+    }
+
     let closestItem = null;
     let minDistance = 999999;
-
     let forwardTarget = null;
     let minForwardDistance = 999999;
 
-    this.itemsManager.items.forEach(item => {
-      if (item.collected) return;
+    // Forward and Right unit vectors in world space
+    const fwdX = -Math.sin(roverHeading);
+    const fwdZ = -Math.cos(roverHeading);
+    const rightX = Math.cos(roverHeading);
+    const rightZ = -Math.sin(roverHeading);
+
+    for (let i = 0; i < count; i++) {
+      const item = items[i];
+      const sigData = this._pooledSignals[i];
+      sigData.item = item;
+
+      if (item.collected) {
+        sigData.active = false;
+        continue;
+      }
+      sigData.active = true;
 
       const dx = item.x - roverPos.x;
       const dz = item.z - roverPos.z;
       const dist = Math.hypot(dx, dz);
 
-      // Forward and Right unit vectors in world space
-      const fwdX = -Math.sin(roverHeading);
-      const fwdZ = -Math.cos(roverHeading);
-      const rightX = Math.cos(roverHeading);
-      const rightZ = -Math.sin(roverHeading);
-
       // 100% mathematically exact rover-relative projections:
       const fwdDist = dx * fwdX + dz * fwdZ;     // >0: front, <0: behind
       const rightDist = dx * rightX + dz * rightZ; // >0: right, <0: left
-
       const signalStrength = Math.max(0, Math.min(100, Math.round(100 - (dist / 1200) * 100)));
 
-      const sigData = {
-        item,
-        dist: Math.round(dist),
-        fwdDist,
-        rightDist,
-        signalStrength,
-        isAhead: fwdDist > 0
-      };
-
-      signals.push(sigData);
+      sigData.dist = Math.round(dist);
+      sigData.fwdDist = fwdDist;
+      sigData.rightDist = rightDist;
+      sigData.signalStrength = signalStrength;
+      sigData.isAhead = fwdDist > 0;
 
       // Closest overall
       if (dist < minDistance) {
@@ -107,17 +135,17 @@ export class MarsRadar {
         minForwardDistance = dist;
         forwardTarget = sigData;
       }
-    });
+    }
 
     // Primary target: Prioritize the target in front so distance counts down as you drive towards it!
     const activeTarget = forwardTarget || closestItem;
 
-    return {
-      signals,
-      closestItem,
-      forwardTarget,
-      activeTarget,
-      minDistance
-    };
+    const res = this._radarResult;
+    res.closestItem = closestItem;
+    res.forwardTarget = forwardTarget;
+    res.activeTarget = activeTarget;
+    res.minDistance = minDistance;
+
+    return res;
   }
 }

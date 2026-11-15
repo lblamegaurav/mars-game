@@ -10,6 +10,13 @@ import { MarsGLBManager } from './glbManager.js';
 import { SpawnPropsManager } from './spawnProps.js';
 import { MarsMultiplayer } from './multiplayer.js';
 
+// Module-level static scratch objects for Zero-Allocation Camera Rig (Pillar 1)
+const _scratchTargetCamPos = new THREE.Vector3();
+const _scratchTargetLookAt = new THREE.Vector3();
+const _scratchMastOffset = new THREE.Vector3();
+const _scratchLookOffset = new THREE.Vector3();
+const _scratchAxisY = new THREE.Vector3(0, 1, 0);
+
 // Floating Collected Artifacts 3D Viewer (Pure rotating GLB models with 1:1 square pixel aspect ratio)
 class CollectedArtifactsViewer {
   constructor(canvas) {
@@ -243,6 +250,8 @@ class MarsGame {
     this.currentFps = 60;
     this.fpsDisplay = document.getElementById('tele-fps');
     this.topFpsDisplay = document.getElementById('top-fps-badge');
+    this.topPingDisplay = document.getElementById('top-ping-badge');
+    this._animateBound = this._animate.bind(this);
     window.addEventListener('resize', () => this._onWindowResize());
 
     // 12. Right-Side Rover Optical Mast Live Camera Feed (Optimized for Mobile/Low-End Hardware)
@@ -261,6 +270,9 @@ class MarsGame {
       this.feedRenderer.toneMapping = THREE.ACESFilmicToneMapping;
       this.feedRenderer.toneMappingExposure = 0.95;
     }
+
+    // Pre-compile all shaders upfront to eliminate shader compilation hitches during gameplay (Pillar 3)
+    this.renderer.compile(this.scene, this.camera);
 
     this._animate();
   }
@@ -633,8 +645,9 @@ class MarsGame {
     const roverHeading = this.rover.heading + this.cameraAngleOffset;
     const pitch = this.cameraPitchOffset;
 
-    let targetCamPos = new THREE.Vector3();
-    let targetLookAt = new THREE.Vector3();
+    // Zero-allocation module static scratch vectors (Pillar 1)
+    const targetCamPos = _scratchTargetCamPos;
+    const targetLookAt = _scratchTargetLookAt;
 
     if (this.cameraMode === 0) {
       // --- Mode 0: Cinematic Dune Follow (Full Horizontal & Vertical Orbital Axis) ---
@@ -667,10 +680,10 @@ class MarsGame {
 
     } else if (this.cameraMode === 1) {
       // --- Mode 1: Optical Sensor Mast (Full 360-degree & Vertical Look) ---
-      const mastOffset = new THREE.Vector3(0.45, 2.65, -1.1)
-        .applyAxisAngle(new THREE.Vector3(0, 1, 0), this.rover.heading);
+      _scratchMastOffset.set(0.45, 2.65, -1.1)
+        .applyAxisAngle(_scratchAxisY, this.rover.heading);
 
-      this.camera.position.copy(roverPos).add(mastOffset);
+      this.camera.position.copy(roverPos).add(_scratchMastOffset);
 
       const fwdDist = 20.0 * Math.cos(-pitch);
       const upDist = 20.0 * Math.sin(-pitch);
@@ -694,7 +707,8 @@ class MarsGame {
         roverPos.z + Math.cos(roverHeading) * surveyDist
       );
 
-      targetLookAt.copy(roverPos).add(new THREE.Vector3(0, 1.0 - pitch * 6.0, 0));
+      _scratchLookOffset.set(0, 1.0 - pitch * 6.0, 0);
+      targetLookAt.copy(roverPos).add(_scratchLookOffset);
       this.camera.position.lerp(targetCamPos, Math.min(1.0, dt * 4.0));
       this.camera.lookAt(targetLookAt);
     }
@@ -709,24 +723,32 @@ class MarsGame {
   }
 
   _animate() {
-    requestAnimationFrame(() => this._animate());
+    // Bound function eliminates per-frame arrow function allocation (Pillar 1)
+    requestAnimationFrame(this._animateBound);
 
     const now = performance.now();
-    const dt = Math.min((now - this.lastTime) / 1000, 0.1);
+    // Delta timing clamped to 0.05s to prevent physics/lerp explosion on frame lag (Pillar 5)
+    const dt = Math.min((now - this.lastTime) / 1000, 0.05);
     this.lastTime = now;
 
-    // Real-time Framerate Monitor
+    // Real-time Framerate & Network Ping Monitor (Throttled to 2 Hz for zero layout thrashing)
     this.frameCount++;
     if (now - this.lastFpsTime >= 500) {
       this.currentFps = Math.round((this.frameCount * 1000) / (now - this.lastFpsTime));
       this.frameCount = 0;
       this.lastFpsTime = now;
+
       if (this.fpsDisplay) {
         this.fpsDisplay.textContent = `${this.currentFps} FPS`;
         this.fpsDisplay.style.color = this.currentFps >= 50 ? '#78b860' : (this.currentFps >= 30 ? '#d4b540' : '#b84030');
       }
       if (this.topFpsDisplay) {
         this.topFpsDisplay.textContent = `${this.currentFps} FPS`;
+      }
+      if (this.topPingDisplay && this.multiplayer) {
+        const pingMs = this.multiplayer.getPing();
+        this.topPingDisplay.textContent = `${pingMs} MS`;
+        this.topPingDisplay.className = pingMs < 60 ? 'ping-pill' : (pingMs < 130 ? 'ping-pill ping-moderate' : 'ping-pill ping-high');
       }
     }
 

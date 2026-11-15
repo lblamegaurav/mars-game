@@ -1,5 +1,11 @@
 import * as THREE from 'three';
 
+// Module-level static scratch objects (Zero-Allocation Pillar 1)
+const _scratchForwardDir = new THREE.Vector3();
+const _scratchWheelPos = new THREE.Vector3();
+const _scratchAxisY = new THREE.Vector3(0, 1, 0);
+const _scratchDustVel = new THREE.Vector3();
+
 export class MarsRover {
   constructor(scene, terrain) {
     this.scene = scene;
@@ -307,7 +313,7 @@ export class MarsRover {
     if (Math.abs(this.velocity) < 0.8) return;
 
     const posAttr = this.dustParticles.geometry.attributes.position;
-    const forwardDir = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), this.heading);
+    _scratchForwardDir.set(0, 0, -1).applyAxisAngle(_scratchAxisY, this.heading);
 
     // Emit from 2 rear wheels or wheels slipping
     const emitOffsets = [
@@ -315,26 +321,27 @@ export class MarsRover {
       this.wheels[5]  // Right rear
     ];
 
-    emitOffsets.forEach(w => {
-      if (Math.random() > 0.45) return;
+    for (let i = 0; i < emitOffsets.length; i++) {
+      const w = emitOffsets[i];
+      if (Math.random() > 0.45) continue;
       const idx = this.dustIdx % this.dustCount;
       this.dustIdx++;
 
-      // World pos of wheel contact patch
-      const wheelPos = new THREE.Vector3(w.offsetX, 0.1, w.offsetZ)
-        .applyAxisAngle(new THREE.Vector3(0, 1, 0), this.heading)
+      // World pos of wheel contact patch (in-place zero allocation)
+      _scratchWheelPos.set(w.offsetX, 0.1, w.offsetZ)
+        .applyAxisAngle(_scratchAxisY, this.heading)
         .add(this.position);
 
-      posAttr.setXYZ(idx, wheelPos.x, wheelPos.y, wheelPos.z);
+      posAttr.setXYZ(idx, _scratchWheelPos.x, _scratchWheelPos.y, _scratchWheelPos.z);
       this.dustLifetimes[idx] = 0.0;
 
       // Dust blows backward opposite to travel + slight upward lift + Mars wind
-      const vel = forwardDir.clone().multiplyScalar(-this.velocity * 0.35);
-      vel.y = 0.4 + Math.random() * 0.6;
-      vel.x += (Math.random() - 0.5) * 0.8 + 0.3; // prevailing wind drift
-      vel.z += (Math.random() - 0.5) * 0.8;
-      this.dustVelocities[idx].copy(vel);
-    });
+      _scratchDustVel.copy(_scratchForwardDir).multiplyScalar(-this.velocity * 0.35);
+      _scratchDustVel.y = 0.4 + Math.random() * 0.6;
+      _scratchDustVel.x += (Math.random() - 0.5) * 0.8 + 0.3; // prevailing wind drift
+      _scratchDustVel.z += (Math.random() - 0.5) * 0.8;
+      this.dustVelocities[idx].copy(_scratchDustVel);
+    }
 
     posAttr.needsUpdate = true;
   }
@@ -362,13 +369,16 @@ export class MarsRover {
   }
 
   update(dt) {
+    // Frame-rate independent delta timing clamped to prevent jitter & physics spikes (Pillar 5)
+    const safeDt = Math.min(dt, 0.05);
+
     // 1. Process Steering
     let targetSteer = 0;
     if (this.inputs.left) targetSteer += this.maxSteerAngle;
     if (this.inputs.right) targetSteer -= this.maxSteerAngle;
 
     // Smoothly turn wheels
-    this.steerAngle += (targetSteer - this.steerAngle) * Math.min(1.0, dt * this.steerSpeed * 4.0);
+    this.steerAngle += (targetSteer - this.steerAngle) * Math.min(1.0, safeDt * this.steerSpeed * 4.0);
 
     // Apply steering angle to wheel assemblies
     this.frontSteerAssemblies.forEach(p => {
@@ -382,35 +392,35 @@ export class MarsRover {
     // Turn heading based on speed and steering
     if (Math.abs(this.velocity) > 0.05) {
       const turnFactor = (this.velocity / this.maxSpeed) * this.steerAngle * 1.8;
-      this.heading += turnFactor * dt;
+      this.heading += turnFactor * safeDt;
     } else if (Math.abs(this.steerAngle) > 0.1 && (this.inputs.left || this.inputs.right)) {
       // Pivot turn in place at zero speed
       const pivotDir = this.inputs.left ? 1 : -1;
-      this.heading += pivotDir * dt * 0.8;
+      this.heading += pivotDir * safeDt * 0.8;
     }
 
     // 2. Throttle & Braking
     if (this.inputs.brake) {
       if (this.velocity > 0) {
-        this.velocity = Math.max(0, this.velocity - this.brakeForce * dt);
+        this.velocity = Math.max(0, this.velocity - this.brakeForce * safeDt);
       } else if (this.velocity < 0) {
-        this.velocity = Math.min(0, this.velocity + this.brakeForce * dt);
+        this.velocity = Math.min(0, this.velocity + this.brakeForce * safeDt);
       }
     } else if (this.inputs.forward) {
-      this.velocity = Math.min(this.maxSpeed, this.velocity + this.accel * dt);
+      this.velocity = Math.min(this.maxSpeed, this.velocity + this.accel * safeDt);
     } else if (this.inputs.backward) {
-      this.velocity = Math.max(this.maxReverseSpeed, this.velocity - this.accel * dt);
+      this.velocity = Math.max(this.maxReverseSpeed, this.velocity - this.accel * safeDt);
     } else {
       // Natural sand rolling drag / coasting
       if (this.velocity > 0) {
-        this.velocity = Math.max(0, this.velocity - this.decel * dt);
+        this.velocity = Math.max(0, this.velocity - this.decel * safeDt);
       } else if (this.velocity < 0) {
-        this.velocity = Math.min(0, this.velocity + this.decel * dt);
+        this.velocity = Math.min(0, this.velocity + this.decel * safeDt);
       }
     }
 
     // 3. Move along heading
-    const moveDist = this.velocity * dt;
+    const moveDist = this.velocity * safeDt;
     this.position.x -= Math.sin(this.heading) * moveDist;
     this.position.z -= Math.cos(this.heading) * moveDist;
 
@@ -443,15 +453,15 @@ export class MarsRover {
     if (this.position.y < surfaceContactHeight - 0.08) {
       this.position.y = surfaceContactHeight - 0.08;
     } else {
-      this.position.y += (surfaceContactHeight - this.position.y) * Math.min(1.0, dt * 20.0);
+      this.position.y += (surfaceContactHeight - this.position.y) * Math.min(1.0, safeDt * 20.0);
     }
 
     // Pitch & Roll angles
     const targetPitch = Math.atan2(hFront - hRear, frontProbeDist * 2);
     const targetRoll = Math.atan2(hLeft - hRight, sideProbeDist * 2);
 
-    this.pitch += (targetPitch - this.pitch) * Math.min(1.0, dt * 10.0);
-    this.roll += (targetRoll - this.roll) * Math.min(1.0, dt * 10.0);
+    this.pitch += (targetPitch - this.pitch) * Math.min(1.0, safeDt * 10.0);
+    this.roll += (targetRoll - this.roll) * Math.min(1.0, safeDt * 10.0);
 
     // Apply transform to 3D object
     this.group.position.copy(this.position);

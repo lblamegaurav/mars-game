@@ -102,6 +102,14 @@ export class SpawnPropsManager {
           wrapper.position.set(def.x, groundY + def.sinkY, def.z);
           wrapper.rotation.set(def.rot[0], def.rot[1], def.rot[2]);
 
+          // Static props never move: freeze world matrices (Pillar 3)
+          wrapper.matrixAutoUpdate = false;
+          wrapper.updateMatrix();
+          wrapper.traverse(child => {
+            child.matrixAutoUpdate = false;
+            child.updateMatrix();
+          });
+
           this.propsGroup.add(wrapper);
         },
         undefined,

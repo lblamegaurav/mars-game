@@ -207,15 +207,15 @@ export class MarsTerrain {
   }
 
   // Calculate terrain normal analytically via central differences
-  getNormal(x, z) {
+  getNormal(x, z, target = null) {
     const eps = 0.5;
     const hL = this.getHeight(x - eps, z);
     const hR = this.getHeight(x + eps, z);
     const hD = this.getHeight(x, z - eps);
     const hU = this.getHeight(x, z + eps);
 
-    const normal = new THREE.Vector3(hL - hR, 2 * eps, hD - hU);
-    normal.normalize();
+    const normal = target || new THREE.Vector3();
+    normal.set(hL - hR, 2 * eps, hD - hU).normalize();
     return normal;
   }
 
